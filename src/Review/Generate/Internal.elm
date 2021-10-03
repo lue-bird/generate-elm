@@ -1,4 +1,4 @@
-module Review.Generate.Internal exposing (Config, DeclarationInsertLocation(..), DeclarationInsertLocationInDifferentModule, DeclarationInsertLocationInSameModule(..), InDifferentModuleConfig, InSameModuleConfig, duplicateMarkerError, errorInArguments, expressionGenerationRequestedError, inModule, inSameModule, missingDeclarationError, missingMarkerError, missingModuleError, replaceStub, rule)
+module Review.Generate.Internal exposing (Config, DeclarationInsertLocation(..), DeclarationInsertLocationInDifferentModule, DeclarationInsertLocationInSameModule(..), InDifferentModuleConfig, InSameModuleConfig, duplicateMarkerError, errorInArguments, expressionGenerationRequestedError, inModule, inSameModule, missingDeclarationError, missingImportFromGeneratingModule, missingMarkerError, missingModuleError, replaceStub, rule)
 
 import Dict exposing (Dict)
 import Dict.Extra as Dict
@@ -345,7 +345,7 @@ generateInSameModule config =
             ModuleNameLookupTable
             -> GenerateInSameModuleModuleContext
         initialModuleContext moduleNameLookupTable =
-            { beforeImports = { row = 1, column = 1 }
+            { beforeImports = { row = 2, column = 1 }
             , imports = Dict.empty
             , declarations = Dict.empty
             , markerRanges = []
@@ -537,18 +537,12 @@ generateInSameModule config =
     Rule.newProjectRuleSchema "Review.Generate"
         initialProjectContext
         |> Rule.withModuleVisitor
-            (Rule.withModuleDefinitionVisitor
+            (withModuleCommentVisitor
                 (\(Node { end } _) context ->
                     ( []
                     , { context | beforeImports = end }
                     )
                 )
-                >> withModuleCommentVisitor
-                    (\(Node { end } _) context ->
-                        ( []
-                        , { context | beforeImports = end }
-                        )
-                    )
                 >> Rule.withCommentsVisitor
                     (\comments context ->
                         ( []
@@ -740,7 +734,7 @@ generateInDifferentModule config =
                 else
                     ModuleNotToGenerateIn
                         { generationRequested = Dict.empty }
-            , beforeImports = { row = 1, column = 1 }
+            , beforeImports = { row = 2, column = 1 }
             , declarations = Dict.empty
             , lookupModuleNameAt =
                 ModuleNameLookupTable.moduleNameAt
@@ -808,33 +802,53 @@ generateInDifferentModule config =
                         { declarationName : String
                         , range : Range
                         , qualified : Qualified
+                        , moduleThatRequestsGeneration : ModuleKey
                         }
                     -> List (Rule.Error errorScope_)
-                generateIfShould existingModuleToGenerateIn generationRequest =
+                generateIfShould existingModuleToGenerateIn { declarationName, qualified, range, moduleThatRequestsGeneration } =
                     let
                         parseNameAndGenerateIfShould =
                             case
                                 Parser.run
                                     generator.checker.nameParser
-                                    generationRequest.declarationName
+                                    declarationName
                             of
-                                Err _ ->
-                                    []
-
                                 Ok information ->
                                     generateDeclarationFix
                                         existingModuleToGenerateIn
-                                        generationRequest
+                                        { declarationName = declarationName }
                                         information
+
+                                Err _ ->
+                                    []
                     in
-                    case generationRequest.qualified of
+                    case qualified of
                         Qualified ->
                             parseNameAndGenerateIfShould
 
                         Unqualified ->
                             case generator.checker.requireQualified |> val of
                                 AllowsUnqualified ->
-                                    parseNameAndGenerateIfShould
+                                    [ parseNameAndGenerateIfShould
+                                    , [ Rule.errorForModuleWithFix
+                                            moduleThatRequestsGeneration
+                                            (missingImportFromGeneratingModule declarationName
+                                                { description = generator.description }
+                                            )
+                                            range
+                                            (Dict.singleton nameOfModuleToGenerateIn
+                                                { alias = Nothing
+                                                , exposed =
+                                                    CodeGen.exposeExplicit
+                                                        [ CodeGen.funExpose declarationName ]
+                                                        |> Just
+                                                }
+                                                |> insertImportsFixAt
+                                                    existingModuleToGenerateIn.beforeImports
+                                            )
+                                      ]
+                                    ]
+                                        |> List.concat
 
                                 RequiresQualified ->
                                     []
@@ -846,14 +860,10 @@ generateInDifferentModule config =
                             , moduleNameRange : Range
                             }
                         )
-                    ->
-                        { range : Range
-                        , declarationName : String
-                        , qualified : Qualified
-                        }
+                    -> { declarationName : String }
                     -> information_
                     -> List (Rule.Error scope_)
-                generateDeclarationFix existingModuleToGenerateIn { declarationName, qualified } information =
+                generateDeclarationFix existingModuleToGenerateIn { declarationName } information =
                     let
                         afterDeclarations : () -> Location
                         afterDeclarations () =
@@ -863,13 +873,6 @@ generateInDifferentModule config =
                                 |> Range.combine
                                 |> .end
 
-                        generated =
-                            generate generator.elm
-                                { declarationName = declarationName
-                                , imports = existingModuleToGenerateIn.imports
-                                }
-                                information
-
                         generateDeclaration : Location -> List (Rule.Error scope_)
                         generateDeclaration insertLocation =
                             [ Rule.errorForModuleWithFix
@@ -878,30 +881,22 @@ generateInDifferentModule config =
                                     { description = generator.description }
                                 )
                                 existingModuleToGenerateIn.moduleNameRange
-                                ([ [ Fix.insertAt insertLocation
+                                (let
+                                    { code, newImports } =
+                                        generate generator.elm
+                                            { declarationName = declarationName
+                                            , imports = existingModuleToGenerateIn.imports
+                                            }
+                                            information
+                                 in
+                                 [ [ Fix.insertAt insertLocation
                                         ([ "\n\n\n"
-                                         , generated.code |> Generator.print
+                                         , code |> Generator.print
                                          ]
                                             |> String.concat
                                         )
                                    ]
-                                 , let
-                                    newImports =
-                                        case qualified of
-                                            Qualified ->
-                                                generated.newImports
-
-                                            Unqualified ->
-                                                generated.newImports
-                                                    |> Dict.insert nameOfModuleToGenerateIn
-                                                        { alias = Nothing
-                                                        , exposed =
-                                                            CodeGen.exposeExplicit
-                                                                [ CodeGen.funExpose declarationName ]
-                                                                |> Just
-                                                        }
-                                   in
-                                   newImports
+                                 , newImports
                                     |> insertImportsFixAt
                                         existingModuleToGenerateIn.beforeImports
                                  , case existingModuleToGenerateIn.exposing_ of
@@ -983,7 +978,7 @@ generateInDifferentModule config =
                 Just existingModuleToGenerateIn ->
                     modulesThatRequestGeneration
                         |> List.concatMap
-                            (\{ generationRequested } ->
+                            (\{ generationRequested, key } ->
                                 Dict.diff
                                     generationRequested
                                     existingModuleToGenerateIn.declarations
@@ -993,6 +988,7 @@ generateInDifferentModule config =
                                             generateIfShould existingModuleToGenerateIn
                                                 { declarationName = declarationName
                                                 , range = generationRequest.range
+                                                , moduleThatRequestsGeneration = key
                                                 , qualified = generationRequest.qualified
                                                 }
                                         )
@@ -1032,11 +1028,10 @@ generateInDifferentModule config =
         initialProjectContext
         |> Rule.withModuleVisitor
             (Rule.withModuleDefinitionVisitor
-                (\(Node { end } moduleDefinition) moduleContext ->
+                (\(Node _ moduleDefinition) moduleContext ->
                     ( []
                     , { moduleContext
-                        | beforeImports = end
-                        , kind =
+                        | kind =
                             case moduleContext.kind of
                                 ModuleToGenerateIn moduleToGenerateIn ->
                                     case moduleDefinition of
@@ -1219,7 +1214,7 @@ insertImportsFixAt insertLocation newImports =
 
     else
         [ Fix.insertAt insertLocation
-            ([ "\n\n"
+            ([ "\n"
              , newImports |> printImports
              ]
                 |> String.concat
@@ -1411,6 +1406,31 @@ missingDeclarationError name { description } =
             |> String.concat
     , details =
         [ [ "Add the auto-generated ", description, " through the fix." ]
+            |> String.concat
+        ]
+    }
+
+
+missingImportFromGeneratingModule :
+    String
+    -> { description : String }
+    -> ErrorInfo
+missingImportFromGeneratingModule name { description } =
+    { message =
+        [ "Import the "
+        , description |> updateFirstChar Char.toUpper
+        , " `"
+        , name
+        , "`"
+        ]
+            |> String.concat
+    , details =
+        [ [ "The value "
+          , name
+          , " looks like a "
+          , description
+          , ", so I want to import it here."
+          ]
             |> String.concat
         ]
     }

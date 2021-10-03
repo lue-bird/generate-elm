@@ -4,7 +4,7 @@ import Elm.Generator as Generator
 import Elm.Generator.RecordFieldHelper exposing (accessors, update)
 import Expect
 import Review.Generate exposing (belowAllDeclarations, belowMarker, inModule, inSameModule, rule)
-import Review.Generate.Internal exposing (duplicateMarkerError, missingDeclarationError, missingMarkerError, missingModuleError)
+import Review.Generate.Internal exposing (duplicateMarkerError, missingDeclarationError, missingImportFromGeneratingModule, missingMarkerError, missingModuleError)
 import Review.Test
 import Test exposing (Test, describe, test)
 
@@ -147,9 +147,10 @@ scoreAPoint =
                             { oneDeclarationKind = accessors.description }
                         ]
             )
-        , test "missing declaration; add after all declarations"
-            (\() ->
-                [ """module Accessors.Library.Fields exposing (a, z)
+        , describe "missing declaration"
+            [ test "used qualified; add after all declarations"
+                (\() ->
+                    [ """module Accessors.Library.Fields exposing (a, z)
 
 a =
     a
@@ -158,32 +159,31 @@ a =
 z =
     z
 """
-                , """module Player exposing (scoreAPoint)
+                    , """module Player exposing (scoreAPoint)
 
 import Accessors.Library.Fields as Field
 
 scoreAPoint =
     Accessors.over Field.score ((+) 1)
 """
-                ]
-                    |> Review.Test.runOnModules
-                        (inModule
-                            ( "Accessors", [ "Library", "Fields" ] )
-                            accessors
-                            |> rule
-                        )
-                    |> Review.Test.expectErrorsForModules
-                        [ ( "Accessors.Library.Fields"
-                          , [ error
-                                (missingDeclarationError "score"
-                                    { description = accessors.description }
-                                )
-                                { under = "Accessors.Library.Fields" }
-                                |> Review.Test.whenFixed
-                                    """module Accessors.Library.Fields exposing (a, z, score)
+                    ]
+                        |> Review.Test.runOnModules
+                            (inModule
+                                ( "Accessors", [ "Library", "Fields" ] )
+                                accessors
+                                |> rule
+                            )
+                        |> Review.Test.expectErrorsForModules
+                            [ ( "Accessors.Library.Fields"
+                              , [ error
+                                    (missingDeclarationError "score"
+                                        { description = accessors.description }
+                                    )
+                                    { under = "Accessors.Library.Fields" }
+                                    |> Review.Test.whenFixed
+                                        """module Accessors.Library.Fields exposing (a, z, score)
 
 import Accessors exposing (Relation, makeOneToOne)
-
 a =
     a
 
@@ -195,6 +195,71 @@ z =
 score : Relation score sub wrap -> Relation { record | score : score } sub wrap
 score =
     makeOneToOne .score (\\f r -> { r | score = f r.score })
+"""
+                                ]
+                              )
+                            ]
+                )
+            ]
+        , test "used unqualified; add after all declarations"
+            (\() ->
+                [ """module Fields exposing (a, z)
+
+a =
+    a
+
+
+z =
+    z
+"""
+                , """module Player exposing (scoreAPoint)
+
+scoreAPoint =
+    updateScore ((+) 1)
+"""
+                ]
+                    |> Review.Test.runOnModules
+                        (inModule
+                            ( "Fields", [] )
+                            update
+                            |> rule
+                        )
+                    |> Review.Test.expectErrorsForModules
+                        [ ( "Fields"
+                          , [ error
+                                (missingDeclarationError "updateScore"
+                                    { description = update.description }
+                                )
+                                { under = "Fields" }
+                                |> Review.Test.whenFixed
+                                    """module Fields exposing (a, z, updateScore)
+
+a =
+    a
+
+
+z =
+    z
+
+
+updateScore : (score -> score) -> { record | score : score } -> { record | score : score }
+updateScore f record =
+    { record | score = f record.score }
+"""
+                            ]
+                          )
+                        , ( "Player"
+                          , [ error
+                                (missingImportFromGeneratingModule "updateScore"
+                                    { description = update.description }
+                                )
+                                { under = "updateScore" }
+                                |> Review.Test.whenFixed
+                                    """module Player exposing (scoreAPoint)
+
+import Fields exposing (updateScore)
+scoreAPoint =
+    updateScore ((+) 1)
 """
                             ]
                           )
@@ -332,7 +397,6 @@ scoreAPoint =
                                     """module Accessors.Library.Fields exposing (name, score)
 
 import Accessors exposing (Relation, makeOneToOne)
-
 -- accessors
 
 
