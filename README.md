@@ -21,18 +21,23 @@ The process can be simplified using [`elm-review`](https://package.elm-lang.org/
 module ReviewConfig exposing (config)
 
 import Review.Generate
-import  Elm.Generator.RecordFieldHelper as RecordFieldHelper
+import Elm.Generator.RecordFieldHelper as RecordFieldHelper
+import Elm.Generator.ELmSvg as Svg
 import Review.Rule exposing (Rule)
+
 
 config : List Rule
 config =
     [ Review.Generate.inModule
-        [ "Accessors", "Library", "Fields" ]
+        ( "Accessors", [ "Library", "Fields" ] )
         RecordFieldHelper.accessors
+        |> Review.Generate.rule
+    , Review.Generate.replaceStub "toGenerateSvg"
+        Svg.generator
         |> Review.Generate.rule
     ]
 ```
-[↑ more details](Review-Generate#rule)
+[↑ more details](Review-Generate#Config)
 
 ## limits
 
