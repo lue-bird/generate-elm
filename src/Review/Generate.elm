@@ -100,7 +100,17 @@ rule ruleConfig =
     Internal.rule (ruleConfig |> toGeneral)
 
 
-{-| The [rule](#rule)'s configuration. See [`Review.Generate.inModule`](#inModule), [`Review.Generate.inSameModule`](#inSameModule).
+{-| The [rule](#rule)'s configuration.
+
+  - [`Review.Generate.replaceStub`](#replaceStub)
+    generate an expression where some given token like `toGenerateX` is noticed
+
+  - [`Review.Generate.inSameModule`](#inSameModule)
+    generate a missing declaration of some format in the module it was used
+
+  - [`Review.Generate.inModule`](#inModule)
+    generate a missing declaration in a given module (and import it if necessary)
+
 -}
 type alias Config information codeReplacingStub requireQualified declaration =
     Internal.Config information codeReplacingStub requireQualified declaration
