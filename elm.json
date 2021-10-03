@@ -5,15 +5,20 @@
     "license": "MIT",
     "version": "1.0.0",
     "exposed-modules": [
+        "Elm.Generator",
         "Review.Generate",
-        "Elm.Generator"
+        "Elm.Generator.ElmSvg",
+        "Elm.Generator.RecordFieldHelper"
     ],
     "elm-version": "0.19.0 <= v < 0.20.0",
     "dependencies": {
+        "Garados007/elm-svg-parser": "1.0.0 <= v < 2.0.0",
         "elm/core": "1.0.5 <= v < 2.0.0",
+        "elm/parser": "1.1.0 <= v < 2.0.0",
         "elm-community/dict-extra": "2.4.0 <= v < 3.0.0",
         "elm-community/list-extra": "8.4.0 <= v < 9.0.0",
         "jfmengels/elm-review": "2.4.0 <= v < 3.0.0",
+        "lue-bird/elm-typed-value": "6.0.0 <= v < 7.0.0",
         "stil4m/elm-syntax": "7.2.1 <= v < 8.0.0",
         "the-sett/elm-pretty-printer": "2.2.3 <= v < 3.0.0",
         "the-sett/elm-syntax-dsl": "5.2.2 <= v < 6.0.0"
