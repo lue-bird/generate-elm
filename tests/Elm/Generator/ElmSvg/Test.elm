@@ -15,6 +15,7 @@ tests =
             (\() ->
                 """module A exposing (..)
 
+
 someIcon =
     todoElmSvg \"\"\"<svg height="150" width="500">
   <ellipse cx="240" cy="100" rx="220" ry="30" style="fill:purple" />

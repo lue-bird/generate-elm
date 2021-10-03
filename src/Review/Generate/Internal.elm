@@ -72,7 +72,7 @@ generateReplacingStubs { generator, stub } =
 
         initialModuleContext : GenerateReplacingStubModuleContext {}
         initialModuleContext =
-            { beforeImports = { row = 1, column = 1 }
+            { beforeImports = { row = 2, column = 1 }
             , imports = Dict.empty
             , declarations = Dict.empty
             , stubs = []
@@ -169,18 +169,12 @@ generateReplacingStubs { generator, stub } =
     Rule.newProjectRuleSchema "Review.Generate"
         initialProjectContext
         |> Rule.withModuleVisitor
-            (Rule.withModuleDefinitionVisitor
+            (withModuleCommentVisitor
                 (\(Node { end } _) context ->
                     ( []
                     , { context | beforeImports = end }
                     )
                 )
-                >> withModuleCommentVisitor
-                    (\(Node { end } _) context ->
-                        ( []
-                        , { context | beforeImports = end }
-                        )
-                    )
                 >> withImportVisitor
                     (\{ moduleName, alias, exposed } context ->
                         ( []
