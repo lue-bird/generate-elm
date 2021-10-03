@@ -474,12 +474,11 @@ fields =
 
     updateScore : (score -> score) -> { record | score : score } -> { record | score : score }
     updateScore f record =
-        { record | score = f r.score } }
+        { record | score = f record.score }
 
 Check out [`Elm.Generator.replaceChecker`](Elm-Generator#replaceChecker) if you prefer a different prefix, for example:
 
     mapScore ((+) 1)
-
     changeScore ((+) 1)
 
     import UpdateField
