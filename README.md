@@ -1,6 +1,6 @@
 > 🐋 The API is quite big, so **expect lots of changes**! 🔨
 
-# generate-elm
+# elm-review-codegen
 
 There are many use-cases for generating elm code:
 
@@ -16,11 +16,11 @@ There are many use-cases for generating elm code:
 - 📃 [protobuf](https://developers.google.com/protocol-buffers/docs/overview): [feral-dot-io's protoc-gen-elmer](https://package.elm-lang.org/packages/feral-dot-io/protoc-gen-elmer/1.0.0/)
 - ...
 
-Elm code generation can be simplified! `generate-elm` 🤜🤛 [`elm-review`](https://package.elm-lang.org/packages/jfmengels/elm-review/latest/):
+Elm code generation can be simplified! `elm-review-codegen` 🤜🤛 [`elm-review`](https://package.elm-lang.org/packages/jfmengels/elm-review/latest/) 🤜🤛 [`elm-codegen`](https://github.com/mdgriffith/elm-codegen):
 
-- no need to install separate command line tools or IDE plugins
+- run without separate command line tools or IDE plugins
 - one simple way to configure, customize and create all code generators
-- adding necessary imports, reporting failed/successful code generation etc. is handled automatically
+- adding necessary imports, reporting failed/successful code generation etc. is handled automatically by [`elm-codegen`](https://github.com/mdgriffith/elm-codegen)
 
 ## configuration
 
@@ -48,8 +48,8 @@ config =
 
 ## limits of [`elm-review`](https://package.elm-lang.org/packages/jfmengels/elm-review/latest/) 😢
 
-- can't make new modules or directories
-- can't read non-elm-specific files or online documents
+- can't make new modules or directories (yet)
+- can't access online resources
 
 To overcome these limitations,
 you can build a tool that generates an elm module with the necessary information
@@ -60,4 +60,5 @@ and run `elm-review` with `generate-elm` as a second step.
 
 
 ## Nice resources
+
 - 📻 [elm-radio podcast 031: Elm Code Generation](https://elm-radio.com/episode/code-generation/)

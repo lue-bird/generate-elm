@@ -21,7 +21,7 @@ import NoDebug.TodoOrToString
 import NoExposingEverything
 import NoForbiddenWords
 import NoImportingEverything
-import NoLeftPizza
+import ReviewPipelineStyles
 import NoMissingTypeAnnotation
 import NoMissingTypeExpose
 import NoSinglePatternCase
@@ -73,18 +73,41 @@ config =
                         NoSinglePatternCase.createNewLet
                 )
         )
-    , NoLeftPizza.rule NoLeftPizza.Any
+    , ReviewPipelineStyles.forbid ReviewPipelineStyles.leftPizzaPipelines
+        |> ReviewPipelineStyles.that ReviewPipelineStyles.haveAnUnnecessaryInputStep
+        |> ReviewPipelineStyles.andTryToFixThemBy ReviewPipelineStyles.eliminatingInputStep
+        |> ReviewPipelineStyles.andCallThem "<| pipeline with simple input"
     , NoBooleanCase.rule
     , OnlyAllSingleUseTypeVarsEndWith_.rule
     , NoRecordAliasConstructor.rule
     , NoFunctionOutsideOfModules.rule
-        [ ( [ "Elm.CodeGen.fqVal"
+        [ ( [ "Elm.CodeGen.fqTyped"
+            , "Elm.CodeGen.typed"
+            , "Elm.CodeGen.boolAnn"
+            , "Elm.CodeGen.intAnn"
+            , "Elm.CodeGen.floatAnn"
+            , "Elm.CodeGen.stringAnn"
+            , "Elm.CodeGen.charAnn"
+            , "Elm.CodeGen.listAnn"
+            , "Elm.CodeGen.setAnn"
+            , "Elm.CodeGen.dictAnn"
+            , "Elm.CodeGen.maybeAnn"
+            ]
+          , [ "Elm.Code.Type" ]
+          )
+        , ( [ "Elm.CodeGen.fqVal"
             , "Elm.CodeGen.fqFun"
             , "Elm.CodeGen.fqConstruct"
-            , "Elm.CodeGen.fqNamedPattern"
-            , "Elm.CodeGen.fqTyped"
+            , "Elm.CodeGen.val"
+            , "Elm.CodeGen.fun"
+            , "Elm.CodeGen.construct"
             ]
-          , [ "Elm.Generator" ]
+          , [ "Elm.Code.Expression" ]
+          )
+        , ( [ "Elm.CodeGen.fqNamedPattern"
+            , "Elm.CodeGen.namedPattern"
+            ]
+          , [ "Elm.Code.Pattern" ]
           )
         ]
     ]

@@ -1,13 +1,18 @@
-module Util exposing (applyIfJust, firstJust, fromNonempty, mapAccumMultipleL, toNonempty, updateFirstChar)
+module Misc exposing (applyIfJust, capitalize, dictKeys, firstJust, mapAccumMultipleL, mapAll3, maybeNonemptyToList, prettyWidth, printPretty, toNonempty, triple, updateFirstChar)
 
-{-| Some utilities that can be used from all modules.
+{-| Some helpers that can be used from all modules.
 -}
+
+import Dict exposing (Dict)
+import List.NonEmpty
+import Pretty exposing (pretty)
+import Set exposing (Set)
 
 
 {-| Change the first character in the string.
 
-    capitalize =
-        updateFirstChar Char.toUpper
+    decapitalize =
+        updateFirstChar Char.toLower
 
 -}
 updateFirstChar : (Char -> Char) -> String -> String
@@ -18,6 +23,22 @@ updateFirstChar f string =
 
         Nothing ->
             ""
+
+
+{-| Convert the first character in the string to lowercase.
+
+    "hello" |> capitalize
+    --> "Hello"
+
+-}
+capitalize : String -> String
+capitalize string =
+    string
+        |> updateFirstChar Char.toUpper
+
+
+
+--
 
 
 firstJust : List (Maybe a) -> Maybe a
@@ -33,13 +54,14 @@ firstJust maybes =
             rest |> firstJust
 
 
-fromNonempty : ( a, List a ) -> List a
-fromNonempty nonemptyList =
-    let
-        ( head, tail ) =
-            nonemptyList
-    in
-    head :: tail
+maybeNonemptyToList : Maybe ( a, List a ) -> List a
+maybeNonemptyToList maybeNonemptyList =
+    case maybeNonemptyList of
+        Just nonEmptyList ->
+            nonEmptyList |> List.NonEmpty.toList
+
+        Nothing ->
+            []
 
 
 toNonempty : List a -> Maybe ( a, List a )
@@ -86,3 +108,45 @@ applyIfJust maybe ifExists =
 
         Nothing ->
             identity
+
+
+
+--
+
+
+dictKeys : Dict comparableKey value_ -> Set comparableKey
+dictKeys dict =
+    dict |> Dict.keys |> Set.fromList
+
+
+
+--
+
+
+triple : first -> second -> third -> ( first, second, third )
+triple first second third =
+    ( first, second, third )
+
+
+mapAll3 :
+    (first -> mappedFirst)
+    -> (second -> mappedSecond)
+    -> (third -> mappedThird)
+    -> ( first, second, third )
+    -> ( mappedFirst, mappedSecond, mappedThird )
+mapAll3 mapFirst mapSecond mapThird =
+    \( a0, a1, a2 ) -> ( mapFirst a0, mapSecond a1, mapThird a2 )
+
+
+
+--
+
+
+prettyWidth : number_
+prettyWidth =
+    92
+
+
+printPretty : Pretty.Doc -> String
+printPretty =
+    pretty prettyWidth

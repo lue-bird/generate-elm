@@ -5,7 +5,7 @@ module Review.Generate exposing
     , InDifferentModuleConfig, inModule
     , DeclarationInsertLocation, belowMarker, belowAllDeclarations, belowDeclarations
     , locally
-    , replaceStub, ReplaceStubConfigWith
+    , replaceStub, ReplaceStubConfig
     )
 
 {-|
@@ -36,12 +36,14 @@ module Review.Generate exposing
 
 ### replacing a stub
 
-@docs replaceStub, ReplaceStubConfigWith
+@docs replaceStub, ReplaceStubConfig
 
 -}
 
+import Elm.Code exposing (Code, ExpressionAny, ModuleScopeDeclarationAny)
+import Elm.Code.Generator exposing (AllowsUnqualified, DeclarationGenerator, ExpressionGenerator)
 import Elm.CodeGen as CodeGen
-import Elm.Generator exposing (AllowsUnqualified, Code, Declaration, DeclarationGenerator, ExpressionGenerator, Generalizable, toGeneral, updateSpecific)
+import Generalizable exposing (Generalizable, toGeneral)
 import Review.Generate.Internal as Internal
 import Review.Rule exposing (Rule)
 
@@ -89,12 +91,7 @@ another module:
 rule :
     Generalizable
         config_
-        (Config
-            forChecking_
-            information_
-            odeReplacingStub_
-            declaration_
-        )
+        (Config forChecking_ information_ declaration_)
     -> Rule
 rule ruleConfig =
     Internal.rule (ruleConfig |> toGeneral)
@@ -112,19 +109,16 @@ rule ruleConfig =
     generate a missing declaration in a given module (and import it if necessary)
 
 -}
-type alias Config information codeReplacingStub requireQualified declaration =
-    Internal.Config information codeReplacingStub requireQualified declaration
+type alias Config information requireQualified declaration =
+    Internal.Config information requireQualified declaration
 
 
 {-| Configuration for what kind of expression will be generated as a replacement for some kind of stub.
 See [`Review.Generate.replaceStub`](#replaceStub).
 -}
-type alias ReplaceStubConfigWith information code =
+type alias ReplaceStubConfig information =
     { stub : String
-    , generator :
-        ExpressionGenerator
-            information
-            (Code { code | expression : CodeGen.Expression })
+    , generator : ExpressionGenerator information
     }
 
 
@@ -213,12 +207,12 @@ Configure where the generated declarations will be placed:
 
 -}
 inModule :
-    ( String, List String )
+    String
     ->
         DeclarationGenerator
             requireQualified
             information
-            (Declaration declaration)
+            (Generalizable declaration ModuleScopeDeclarationAny)
     ->
         Generalizable
             (InDifferentModuleConfig
@@ -226,12 +220,7 @@ inModule :
                 information
                 declaration
             )
-            (Config
-                information
-                codeReplacingStub_
-                requireQualified
-                declaration
-            )
+            (Config information requireQualified declaration)
 inModule moduleToGenerateIn generators =
     Internal.inModule moduleToGenerateIn generators
 
@@ -264,19 +253,11 @@ inSameModule :
     DeclarationGenerator
         AllowsUnqualified
         information
-        (Declaration declaration)
+        (Generalizable declaration ModuleScopeDeclarationAny)
     ->
         Generalizable
-            (InSameModuleConfig
-                information
-                declaration
-            )
-            (Config
-                information
-                codeReplacingStub_
-                requireQualified_
-                declaration
-            )
+            (InSameModuleConfig information declaration)
+            (Config information Never declaration)
 inSameModule generator =
     Internal.inSameModule generator
 
@@ -314,7 +295,7 @@ belowMarker :
             }
             general
 belowMarker marker =
-    updateSpecific
+    Generalizable.alter
         (\c ->
             { c
                 | insertLocation =
@@ -362,7 +343,7 @@ belowAllDeclarations :
             }
             general
 belowAllDeclarations =
-    updateSpecific
+    Generalizable.alter
         (\c ->
             { c
                 | insertLocation =
@@ -438,7 +419,7 @@ belowDeclarations :
             }
             general
 belowDeclarations declarationsAbove =
-    updateSpecific
+    Generalizable.alter
         (\c ->
             { c
                 | insertLocation =
@@ -506,7 +487,7 @@ locally :
             (InSameModuleConfig information declaration)
             config
 locally =
-    updateSpecific
+    Generalizable.alter
         (\c ->
             { c
                 | insertLocation =
@@ -519,33 +500,23 @@ locally =
 {-| Generate a given expression where a (non-existent) function with the given name is called
 
     import Review.Generate
-    import  Elm.Generator.ElmSvg as Svg
+    import Elm.Generator.Svg as Svg
 
-    Review.Generate.replaceStub "toGenerateElmSvg"
+    Review.Generate.replaceStub "toGenerateSvg"
         Svg.Generate
         |> Review.Generate.rule
 
 will replace
 
-    toGenerateElmSvg """<svg>This is svg</svg>"""
+    toGenerateSvg """<svg>This is svg</svg>"""
 
 -}
 replaceStub :
     String
-    ->
-        ExpressionGenerator
-            information
-            (Code
-                { codeReplacingStub | expression : CodeGen.Expression }
-            )
+    -> ExpressionGenerator information
     ->
         Generalizable
-            (ReplaceStubConfigWith information codeReplacingStub)
-            (Config
-                information
-                codeReplacingStub
-                requireQualified_
-                declaration_
-            )
+            (ReplaceStubConfig information)
+            (Config information Never Never)
 replaceStub stub generator =
     Internal.replaceStub stub generator

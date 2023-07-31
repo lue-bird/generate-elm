@@ -1,125 +1,37 @@
-module SyntaxExtra exposing (containsRange, isValueOrCall, joinAndSortImports, nameOfDeclaration, nameOfExpose, printImports, printPretty, reindent, typeds)
+module SyntaxExtra exposing (Imports, ModuleName, containsRange, isValueOrCall, nameOfDeclaration, nameOfExpose, printDeclaration, printExpressionSyntax, printImports, reindent, typeds)
 
 import Dict exposing (Dict)
 import Dict.Extra as Dict
-import Elm.CodeGen as CodeGen
+import Elm.Code as Code exposing (Exposing, Import, declarationToDslSyntax)
+import Elm.CodeGen as CodeGen exposing (exposeExplicit, openTypeExpose, typeOrAliasExpose)
 import Elm.Pretty as CodeGen
 import Elm.Syntax.Declaration exposing (Declaration(..))
 import Elm.Syntax.Exposing as Exposing exposing (TopLevelExpose(..))
-import Elm.Syntax.Expression as Expression exposing (Expression)
+import Elm.Syntax.Expression as Expression exposing (Expression(..))
+import Elm.Syntax.Import as Import
 import Elm.Syntax.Node as Node exposing (Node(..))
 import Elm.Syntax.Range as Range exposing (Range)
 import Elm.Syntax.TypeAnnotation exposing (TypeAnnotation(..))
+import Generalizable exposing (Generalizable)
 import List.Extra as List
+import List.NonEmpty
+import Misc exposing (applyIfJust, firstJust, prettyWidth, printPretty)
 import Pretty exposing (pretty)
-import Util exposing (firstJust, fromNonempty)
+import Stack exposing (StackFilled)
 
 
-{-| [`Elm.Syntax.ModuleName`](https://package.elm-lang.org/packages/stil4m/elm-syntax/latest/Elm-Syntax-ModuleName#ModuleName)
-and [`Elm.CodeGen.ModuleName`](https://package.elm-lang.org/packages/the-sett/elm-syntax-dsl/latest/Elm-CodeGen#ModuleName)
-describe an optional module name.
-This will change in the next `elm-syntax` version: [issue about `ModuleName`](https://github.com/stil4m/elm-syntax/issues/70)
-
-Until then, we'll just use this :)
-
--}
 type alias ModuleName =
-    ( String, List String )
+    String
 
 
-{-| [`Import`](Elm-Generator#Import)s by imported module name.
+{-| [`Import`](#Import)s by imported module name.
 -}
 type alias Imports =
     Dict
         ModuleName
         { alias : Maybe String
-        , exposed : Maybe CodeGen.Exposing
+        , exposed : Maybe Exposing
         }
-
-
-joinAndSortImports :
-    List
-        { name : ( String, List String )
-        , alias : Maybe String
-        , exposed : Maybe CodeGen.Exposing
-        }
-    ->
-        Dict
-            ( String, List String )
-            { alias : Maybe String
-            , exposed : Maybe CodeGen.Exposing
-            }
-joinAndSortImports =
-    List.map
-        (\{ name, alias, exposed } ->
-            ( name, { alias = alias, exposed = exposed } )
-        )
-        >> Dict.fromListDedupe
-            (\a b ->
-                { alias = firstJust [ a.alias, b.alias ]
-                , exposed =
-                    case ( a.exposed, b.exposed ) of
-                        ( Nothing, bExposed ) ->
-                            bExposed
-
-                        ( aExposed, Nothing ) ->
-                            aExposed
-
-                        ( Just aExposed, Just bExposed ) ->
-                            joinExposings aExposed bExposed
-                                |> Just
-                }
-            )
-
-
-joinExposings :
-    CodeGen.Exposing
-    -> CodeGen.Exposing
-    -> CodeGen.Exposing
-joinExposings aExposed bExposed =
-    case ( aExposed, bExposed ) of
-        ( Exposing.All _, _ ) ->
-            CodeGen.exposeAll
-
-        ( _, Exposing.All _ ) ->
-            CodeGen.exposeAll
-
-        ( Exposing.Explicit aExposedList, Exposing.Explicit bExposedList ) ->
-            CodeGen.exposeExplicit
-                ((aExposedList ++ bExposedList)
-                    |> List.foldl
-                        (\(Node _ expose) soFar ->
-                            let
-                                exposeName =
-                                    nameOfExpose expose
-
-                                existingExposeWithSameName : Maybe CodeGen.TopLevelExpose
-                                existingExposeWithSameName =
-                                    soFar
-                                        |> List.filter
-                                            (nameOfExpose >> (==) exposeName)
-                                        |> List.head
-                            in
-                            case ( expose, existingExposeWithSameName ) of
-                                ( TypeExpose { open }, Just (TypeExpose _) ) ->
-                                    case open of
-                                        Just _ ->
-                                            soFar
-                                                |> List.updateIf
-                                                    (nameOfExpose >> (==) exposeName)
-                                                    (\_ -> expose)
-
-                                        Nothing ->
-                                            soFar
-
-                                ( _, Just _ ) ->
-                                    soFar
-
-                                ( _, Nothing ) ->
-                                    expose :: soFar
-                        )
-                        []
-                )
 
 
 nameOfExpose : CodeGen.TopLevelExpose -> String
@@ -233,26 +145,53 @@ containsRange range =
 --
 
 
-printPretty : Pretty.Doc -> String
-printPretty =
-    pretty 100
-
-
-printImports :
-    Imports
-    -> String
-printImports =
-    Dict.toList
-        >> List.map
+{-| todo: move to Elm.Code.
+-}
+importsToSyntax : Imports -> List Import.Import
+importsToSyntax imports =
+    imports
+        |> Dict.toList
+        |> List.map
             (\( moduleName, { alias, exposed } ) ->
-                CodeGen.importStmt
-                    (moduleName |> fromNonempty)
-                    (alias |> Maybe.map List.singleton)
-                    exposed
+                Code.import_ moduleName
+                    |> applyIfJust alias Code.withAs
+                    |> applyIfJust exposed
+                        (\expos ->
+                            case expos of
+                                Code.Exposing list ->
+                                    Code.withExposing (\_ -> list)
+
+                                Code.ExposingAll ->
+                                    Code.withExposingAll
+                        )
+                    |> Code.importToSyntax
             )
-        -- ↓ automatically de-duplicates and sorts imports
-        >> CodeGen.prettyImports
-        >> printPretty
+
+
+printImports : Imports -> String
+printImports imports =
+    imports
+        |> importsToSyntax
+        |> CodeGen.prettyImports
+        |> printPretty
+
+
+printDeclaration :
+    { imports : Imports }
+    -> Generalizable specific_ Code.ModuleScopeDeclarationAny
+    -> String
+printDeclaration imports declaration =
+    declaration
+        |> declarationToDslSyntax imports
+        |> CodeGen.prettyDeclaration prettyWidth
+        |> printPretty
+
+
+printExpressionSyntax : Expression.Expression -> String
+printExpressionSyntax expressionSyntax =
+    expressionSyntax
+        |> CodeGen.prettyExpression
+        |> printPretty
 
 
 {-| Re-indent a section of generated code to ensure that it doesn't cause issues

@@ -1,8 +1,10 @@
 module Review.Generate.Test exposing (all, error)
 
-import Elm.Generator as Generator
-import Elm.Generator.RecordFieldHelper exposing (accessors, update)
+import Elm.Code as Code
+import Elm.Code.Generator as Generator
+import Elm.RecordHelper.Generator exposing (accessors, fieldNameParserUntil, focus, update)
 import Expect
+import Parser exposing ((|.), (|=))
 import Review.Generate exposing (belowAllDeclarations, belowMarker, inModule, inSameModule, rule)
 import Review.Generate.Internal exposing (duplicateMarkerError, missingDeclarationError, missingImportFromGeneratingModule, missingMarkerError, missingModuleError)
 import Review.Test
@@ -26,9 +28,10 @@ generateInSameModule =
 generateInSameModuleFail : Test
 generateInSameModuleFail =
     describe "report"
-        [ test "missing declaration; add after all declarations"
-            (\() ->
-                """module Player exposing (scoreAPoint)
+        [ describe "missing declaration"
+            [ test "add after all declarations"
+                (\() ->
+                    """module Player exposing (scoreAPoint)
 
 scoreAPoint =
     updateScore ((+) 1)
@@ -37,19 +40,19 @@ scoreAPoint =
 z =
     z
 """
-                    |> Review.Test.run
-                        (inSameModule update
-                            |> belowAllDeclarations
-                            |> rule
-                        )
-                    |> Review.Test.expectErrors
-                        [ error
-                            (missingDeclarationError "updateScore"
-                                { description = update.description }
+                        |> Review.Test.run
+                            (inSameModule update
+                                |> belowAllDeclarations
+                                |> rule
                             )
-                            { under = "updateScore" }
-                            |> Review.Test.whenFixed
-                                """module Player exposing (scoreAPoint)
+                        |> Review.Test.expectErrors
+                            [ error
+                                (missingDeclarationError "updateScore"
+                                    { description = update.description }
+                                )
+                                { under = "updateScore" }
+                                |> Review.Test.whenFixed
+                                    """module Player exposing (scoreAPoint)
 
 scoreAPoint =
     updateScore ((+) 1)
@@ -63,11 +66,11 @@ updateScore : (score -> score) -> { record | score : score } -> { record | score
 updateScore f record =
     { record | score = f record.score }
 """
-                        ]
-            )
-        , test "missing declaration; add after declaration it was referenced in"
-            (\() ->
-                """module Player exposing (scoreAPoint)
+                            ]
+                )
+            , test "add after declaration it was referenced in"
+                (\() ->
+                    """module Player exposing (scoreAPoint)
 
 scoreAPoint =
     updateScore ((+) 1)
@@ -76,18 +79,18 @@ scoreAPoint =
 z =
     z
 """
-                    |> Review.Test.run
-                        (inSameModule update
-                            |> rule
-                        )
-                    |> Review.Test.expectErrors
-                        [ error
-                            (missingDeclarationError "updateScore"
-                                { description = update.description }
+                        |> Review.Test.run
+                            (inSameModule update
+                                |> rule
                             )
-                            { under = "updateScore" }
-                            |> Review.Test.whenFixed
-                                """module Player exposing (scoreAPoint)
+                        |> Review.Test.expectErrors
+                            [ error
+                                (missingDeclarationError "updateScore"
+                                    { description = update.description }
+                                )
+                                { under = "updateScore" }
+                                |> Review.Test.whenFixed
+                                    """module Player exposing (scoreAPoint)
 
 scoreAPoint =
     updateScore ((+) 1)
@@ -101,8 +104,63 @@ updateScore f record =
 z =
     z
 """
-                        ]
-            )
+                            ]
+                )
+            , test "necessary module imports already exist"
+                (\() ->
+                    """module Player exposing (scoreAPoint)
+
+import Focus
+
+
+scoreAPoint =
+    Focus.modify scoreFocus ((+) 1)
+
+
+z =
+    z
+"""
+                        |> Review.Test.run
+                            (inSameModule
+                                (focus
+                                    |> Generator.replaceChecker
+                                        (Generator.nameChecker
+                                            (Parser.succeed identity
+                                                |= fieldNameParserUntil
+                                                    (Parser.symbol "Focus")
+                                                |. Parser.end
+                                            )
+                                        )
+                                )
+                                |> rule
+                            )
+                        |> Review.Test.expectErrors
+                            [ error
+                                (missingDeclarationError "scoreFocus"
+                                    { description = focus.description }
+                                )
+                                { under = "scoreFocus" }
+                                |> Review.Test.whenFixed
+                                    """module Player exposing (scoreAPoint)
+
+import Focus
+
+
+scoreAPoint =
+    Focus.modify scoreFocus ((+) 1)
+
+
+scoreFocus : Focus.Focus { record | score : score } score
+scoreFocus =
+    Focus.create .score (\\f r -> { r | score = f r.score })
+
+
+z =
+    z
+"""
+                            ]
+                )
+            ]
         ]
 
 
@@ -136,14 +194,12 @@ scoreAPoint =
 """
                 ]
                     |> Review.Test.runOnModules
-                        (inModule
-                            ( "Accessors", [ "Library", "Fields" ] )
+                        (inModule "Accessors.Library.Fields"
                             accessors
                             |> rule
                         )
                     |> Review.Test.expectGlobalErrors
-                        [ missingModuleError
-                            ( "Accessors", [ "Library", "Fields" ] )
+                        [ missingModuleError "Accessors.Library.Fields"
                             { oneDeclarationKind = accessors.description }
                         ]
             )
@@ -168,8 +224,7 @@ scoreAPoint =
 """
                     ]
                         |> Review.Test.runOnModules
-                            (inModule
-                                ( "Accessors", [ "Library", "Fields" ] )
+                            (inModule "Accessors.Library.Fields"
                                 accessors
                                 |> rule
                             )
@@ -219,9 +274,7 @@ scoreAPoint =
 """
                 ]
                     |> Review.Test.runOnModules
-                        (inModule
-                            ( "Fields", [] )
-                            update
+                        (inModule "Fields" update
                             |> rule
                         )
                     |> Review.Test.expectErrorsForModules
@@ -287,8 +340,7 @@ scoreAPoint =
 """
                 ]
                     |> Review.Test.runOnModules
-                        (inModule
-                            ( "Fields", [] )
+                        (inModule "Fields"
                             accessors
                             |> belowMarker "accessors"
                             |> rule
@@ -335,8 +387,7 @@ scoreAPoint =
 """
                 ]
                     |> Review.Test.runOnModules
-                        (inModule
-                            ( "Fields", [] )
+                        (inModule "Fields"
                             accessors
                             |> belowMarker "accessors"
                             |> rule
@@ -380,8 +431,7 @@ scoreAPoint =
 """
                 ]
                     |> Review.Test.runOnModules
-                        (inModule
-                            ( "Accessors", [ "Library", "Fields" ] )
+                        (inModule "Accessors.Library.Fields"
                             accessors
                             |> belowMarker "accessors"
                             |> rule
@@ -433,8 +483,7 @@ scoreAPoint =
        """
             ]
                 |> Review.Test.runOnModules
-                    (inModule
-                        ( "Accessors", [ "Library", "Fields" ] )
+                    (inModule "Accessors.Library.Fields"
                         accessors
                         |> rule
                     )
@@ -447,8 +496,8 @@ declarations =
     describe "kinds of declarations"
         [ test ("function declaration ( " ++ accessors.description ++ " as an example")
             (\() ->
-                accessors.elm
-                    |> Generator.printUsingSpecifiedImports "score"
+                accessors.what
+                    |> Code.printUsingSpecifiedImports "score"
                         { fieldName = "score" }
                     |> Expect.equal
                         """score : Relation score sub wrap -> Relation { record | score : score } sub wrap

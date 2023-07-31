@@ -8,6 +8,7 @@
         "direct": {
             "NeoVier/elm-review-no-function-outside-of-modules": "2.0.0",
             "SiriusStarr/elm-review-no-single-pattern-case": "2.0.0",
+            "SiriusStarr/elm-review-pipeline-styles": "1.0.0",
             "elm/core": "1.0.5",
             "jfmengels/elm-review": "2.5.2",
             "jfmengels/elm-review-common": "1.1.2",
@@ -18,8 +19,7 @@
             "lue-bird/elm-review-record-alias-constructor": "1.0.3",
             "lue-bird/elm-review-single-use-type-vars-end-with-underscore": "2.0.1",
             "sparksp/elm-review-forbidden-words": "1.0.1",
-            "truqu/elm-review-nobooleancase": "1.0.0",
-            "truqu/elm-review-noleftpizza": "2.0.0"
+            "truqu/elm-review-nobooleancase": "1.0.0"
         },
         "indirect": {
             "Chadtech/elm-bool-extra": "2.4.2",

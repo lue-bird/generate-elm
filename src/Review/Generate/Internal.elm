@@ -1,31 +1,37 @@
-module Review.Generate.Internal exposing (Config, DeclarationInsertLocation(..), DeclarationInsertLocationInDifferentModule, DeclarationInsertLocationInSameModule(..), InDifferentModuleConfig, InSameModuleConfig, duplicateMarkerError, errorInArguments, expressionGenerationRequestedError, inModule, inSameModule, missingDeclarationError, missingImportFromGeneratingModule, missingMarkerError, missingModuleError, replaceStub, rule)
+module Review.Generate.Internal exposing (Config, DeclarationInsertLocation(..), InDifferentModuleConfig, InSameModuleConfig, InsertLocationInDifferentModule, InsertLocationInSameModule(..), duplicateMarkerError, errorInArguments, expressionGenerationRequestedError, inModule, inSameModule, missingDeclarationError, missingImportFromGeneratingModule, missingMarkerError, missingModuleError, replaceStub, rule)
 
 import Dict exposing (Dict)
 import Dict.Extra as Dict
+import Elm.Code as Code exposing (Code, Exposing, Imports, ModuleOrigin(..), ModuleScopeDeclarationAny, Origin, declarationToDslSyntax, expressionToSyntax, implicitImports, importsFromList, moduleNameFromSyntax, originLookupByModules, syntaxToExposingIn)
+import Elm.Code.Generator as Generator exposing (AllowsUnqualified, DeclarationGenerator, ExpressionGenerator, RequireQualified(..))
+import Elm.Code.Module as DocsModule
 import Elm.CodeGen as CodeGen
-import Elm.Generator as Generator exposing (AllowsUnqualified, Code, DeclarationGenerator, ExpressionGenerator, Generalizable, Imports, ModuleName, RequireQualified(..), generalizable)
+import Elm.Docs as Docs
 import Elm.Pretty as CodeGen
-import Elm.Syntax.Declaration exposing (Declaration(..))
+import Elm.Syntax.Declaration as Declaration
 import Elm.Syntax.Exposing as Exposing exposing (Exposing)
 import Elm.Syntax.Expression as Expression exposing (Expression)
 import Elm.Syntax.Module exposing (Module(..))
 import Elm.Syntax.Node as Node exposing (Node(..))
 import Elm.Syntax.Range as Range exposing (Location, Range)
 import Elm.Syntax.TypeAnnotation exposing (TypeAnnotation)
+import Generalizable exposing (Generalizable, toGeneral)
 import List.Extra as List
-import Parser
+import List.NonEmpty
+import List.Nonempty
+import Misc exposing (dictKeys, firstJust, mapAccumMultipleL, prettyWidth, printPretty, toNonempty, updateFirstChar)
 import Pretty exposing (pretty)
+import ResultME
 import Review.Fix as Fix exposing (Fix)
 import Review.ModuleNameLookupTable as ModuleNameLookupTable exposing (ModuleNameLookupTable)
-import Review.Rule as Rule exposing (ModuleKey, ModuleRuleSchema, Rule)
-import SyntaxExtra exposing (containsRange, isValueOrCall, nameOfDeclaration, printImports, reindent, typeds)
+import Review.Project.Dependency as Dependency
+import Review.Rule as Rule exposing (ModuleKey, ModuleRuleSchema, ProjectRuleSchema, Rule)
+import Set exposing (Set)
+import SyntaxExtra exposing (containsRange, isValueOrCall, nameOfDeclaration, nameOfExpose, printDeclaration, printExpressionSyntax, printImports, reindent, typeds)
 import Typed exposing (val)
-import Util exposing (firstJust, fromNonempty, mapAccumMultipleL, toNonempty, updateFirstChar)
 
 
-rule :
-    Config information_ codeReplacingStub_ requireQualified_ declaration_
-    -> Rule
+rule : Config information_ requireQualified_ declaration_ -> Rule
 rule config =
     case config of
         ReplaceStub replaceStubConfig ->
@@ -41,17 +47,20 @@ rule config =
 type alias GenerateReplacingStubProjectContext =
     { inModules :
         Dict
-            ModuleName
+            String
             (GenerateReplacingStubModuleContext { key : ModuleKey })
+    , exposedFromModules :
+        Dict String (Set String)
     }
 
 
 type alias GenerateReplacingStubModuleContext more =
     { more
-        | beforeImports : Location
-        , imports :
-            Imports
-        , declarations : Dict String (Node Declaration)
+        | exposed : Code.Exposing
+        , beforeImports : Location
+        , imports : Imports
+        , declarations :
+            Dict String (Node Declaration.Declaration)
         , stubs :
             List
                 { arguments : List Expression
@@ -60,14 +69,13 @@ type alias GenerateReplacingStubModuleContext more =
     }
 
 
-generateReplacingStubs :
-    ReplaceStubConfig information_ codeReplacingStub_
-    -> Rule
+generateReplacingStubs : ReplaceStubConfig information_ -> Rule
 generateReplacingStubs { generator, stub } =
     let
         initialProjectContext : GenerateReplacingStubProjectContext
         initialProjectContext =
             { inModules = Dict.empty
+            , exposedFromModules = Dict.empty
             }
 
         initialModuleContext : GenerateReplacingStubModuleContext {}
@@ -79,7 +87,7 @@ generateReplacingStubs { generator, stub } =
             }
 
         moduleToProjectContext :
-            ModuleName
+            String
             -> ModuleKey
             -> GenerateReplacingStubModuleContext {}
             -> GenerateReplacingStubProjectContext
@@ -92,6 +100,7 @@ generateReplacingStubs { generator, stub } =
                     , declarations = declarations
                     , stubs = stubs
                     }
+            , exposed = Debug.todo ""
             }
 
         foldProjectContexts :
@@ -106,63 +115,74 @@ generateReplacingStubs { generator, stub } =
             GenerateReplacingStubProjectContext
             -> List (Rule.Error { useErrorForModule : () })
         finalEvaluation { inModules } =
-            let
-                tryGenerating :
-                    { module_
-                        | arguments : List Expression
-                        , range : Range
-                    }
-                    -> GenerateReplacingStubModuleContext { key : ModuleKey }
-                    -> List (Rule.Error scope_)
-                tryGenerating functionOrValue { key, beforeImports, imports } =
-                    case functionOrValue.arguments |> generator.checker of
-                        Err errorMessage ->
-                            [ Rule.errorForModule key
-                                (errorInArguments
-                                    { description = generator.description
-                                    , errorMessage = errorMessage
-                                    }
-                                )
-                                functionOrValue.range
-                            ]
-
-                        Ok information ->
-                            let
-                                generated =
-                                    generate generator.elm
-                                        { declarationName = stub
-                                        , imports = imports
-                                        }
-                                        information
-                            in
-                            [ Rule.errorForModuleWithFix key
-                                (expressionGenerationRequestedError
-                                    { description = generator.description }
-                                )
-                                functionOrValue.range
-                                ([ [ Fix.replaceRangeBy functionOrValue.range
-                                        (generated.code.specific.expression
-                                            |> CodeGen.prettyExpression
-                                            |> pretty 100
-                                            |> reindent functionOrValue.range.start.column
-                                        )
-                                   ]
-                                 , generated.newImports
-                                    |> insertImportsFixAt beforeImports
-                                 ]
-                                    |> List.concat
-                                )
-                            ]
-            in
             inModules
                 |> Dict.values
                 |> List.concatMap
                     (\module_ ->
+                        let
+                            originLookup =
+                                Code.originLookupByModules (Debug.todo "") module_.imports
+
+                            locate =
+                                Code.locateOrigin originLookupByModules
+
+                            tryGenerating :
+                                { module_
+                                    | arguments : List Expression
+                                    , range : Range
+                                }
+                                -> GenerateReplacingStubModuleContext { key : ModuleKey }
+                                -> List (Rule.Error scope_)
+                            tryGenerating functionOrValue { key, beforeImports, imports } =
+                                case
+                                    functionOrValue.arguments
+                                        |> List.map
+                                            (syntaxToExpression { locate = locate })
+                                        |> ResultME.combineList
+                                        |> ResultME.andThen generator.when
+                                of
+                                    Err errors ->
+                                        [ Rule.errorForModule key
+                                            (errorInArguments
+                                                { description = generator.description
+                                                , errors = errors |> List.Nonempty.toList
+                                                }
+                                            )
+                                            functionOrValue.range
+                                        ]
+
+                                    Ok information ->
+                                        let
+                                            gen =
+                                                generate generator.what
+                                                    { declarationName = stub
+                                                    , imports = imports
+                                                    }
+                                                    information
+                                        in
+                                        [ Rule.errorForModuleWithFix key
+                                            (expressionGenerationRequestedError
+                                                { description = generator.description }
+                                            )
+                                            functionOrValue.range
+                                            ([ [ Fix.replaceRangeBy functionOrValue.range
+                                                    (gen.code
+                                                        |> expressionToSyntax { imports = gen.imports }
+                                                        |> printExpressionSyntax
+                                                        |> reindent functionOrValue.range.start.column
+                                                    )
+                                               ]
+                                             , gen.newImports
+                                                |> insertImportsFixAt beforeImports
+                                             ]
+                                                |> List.concat
+                                            )
+                                        ]
+                        in
                         module_.stubs
                             |> List.concatMap
                                 (\stub_ ->
-                                    tryGenerating stub_
-                                        module_
+                                    tryGenerating stub_ module_
                                 )
                     )
     in
@@ -215,11 +235,8 @@ generateReplacingStubs { generator, stub } =
                                     Expression.FunctionOrValue [] name ->
                                         isStubWithArgs name []
 
-                                    Expression.Application ((Node _ (Expression.FunctionOrValue [] name)) :: (Node _ firstArgument) :: followingArguments) ->
-                                        isStubWithArgs name
-                                            (firstArgument
-                                                :: (followingArguments |> List.map Node.value)
-                                            )
+                                    Expression.Application ((Node _ (Expression.FunctionOrValue [] name)) :: arguments) ->
+                                        isStubWithArgs name (arguments |> List.map Node.value)
 
                                     _ ->
                                         Nothing
@@ -260,39 +277,35 @@ generateReplacingStubs { generator, stub } =
 
 
 generate :
-    ({ declarationName : String
-     , imports : Imports
-     }
+    ({ declarationName : String }
      -> information
-     -> Code code
+     -> Generalizable declaration ModuleScopeDeclarationAny
     )
-    ->
-        { declarationName : String
-        , imports : Imports
-        }
+    -> { declarationName : String, imports : Imports }
     -> information
     ->
-        { code : Code code
+        { code : general
+        , imports : Imports
         , newImports : Imports
         }
 generate codeGenerator { declarationName, imports } information =
     let
-        defaultImports =
-            codeGenerator
-                { declarationName = "", imports = Dict.empty }
-                information
-                |> .specific
-                |> .imports
+        existingImports : Imports
+        existingImports =
+            Dict.union imports implicitImports
 
+        generated : Code general
+        generated =
+            codeGenerator { declarationName = declarationName } information
+                |> toGeneral
+
+        newImports : Imports
         newImports =
-            Dict.diff defaultImports imports
+            -- todo: add exposed, but don't use preferred alias
+            Dict.diff generated.imports existingImports
     in
-    { code =
-        codeGenerator
-            { declarationName = declarationName
-            , imports = Dict.union imports newImports
-            }
-            information
+    { code = generated.code
+    , imports = Dict.union existingImports newImports
     , newImports = newImports
     }
 
@@ -300,9 +313,8 @@ generate codeGenerator { declarationName, imports } information =
 type alias GenerateInSameModuleBaseContext more =
     { more
         | beforeImports : Location
-        , imports :
-            Imports
-        , declarations : Dict String (Node Declaration)
+        , imports : Imports
+        , declarations : Dict String (Node Declaration.Declaration)
         , markerRanges : List Range
         , generationRequested :
             Dict String { range : Range }
@@ -311,14 +323,16 @@ type alias GenerateInSameModuleBaseContext more =
 
 type alias GenerateInSameModuleModuleContext =
     GenerateInSameModuleBaseContext
-        { lookupModuleNameAt : Range -> Maybe (List String) }
+        { moduleNameAt : Range -> Maybe (List String) }
 
 
 type alias GenerateInSameModuleProjectContext =
     { inModules :
         Dict
-            ModuleName
+            String
             (GenerateInSameModuleBaseContext { key : ModuleKey })
+    , exposedFromDependencies :
+        Dict ModuleName (Set String)
     }
 
 
@@ -326,6 +340,7 @@ generateInSameModule :
     InSameModuleConfig information_ declaration_
     -> Rule
 generateInSameModule config =
+    -- todo: synchronize
     let
         { generator } =
             config
@@ -333,6 +348,7 @@ generateInSameModule config =
         initialProjectContext : GenerateInSameModuleProjectContext
         initialProjectContext =
             { inModules = Dict.empty
+            , exposedFromDependencies = Dict.empty
             }
 
         initialModuleContext :
@@ -344,7 +360,7 @@ generateInSameModule config =
             , declarations = Dict.empty
             , markerRanges = []
             , generationRequested = Dict.empty
-            , lookupModuleNameAt =
+            , moduleNameAt =
                 ModuleNameLookupTable.moduleNameAt
                     moduleNameLookupTable
             }
@@ -364,6 +380,7 @@ generateInSameModule config =
                     , markerRanges = moduleContext.markerRanges
                     , generationRequested = moduleContext.generationRequested
                     }
+            , exposedFromDependencies = Dict.empty
             }
 
         foldProjectContexts :
@@ -373,10 +390,13 @@ generateInSameModule config =
         foldProjectContexts aContext bContext =
             { inModules =
                 Dict.union aContext.inModules bContext.inModules
+            , exposedFromDependencies =
+                Dict.union aContext.exposedFromDependencies
+                    bContext.exposedFromDependencies
             }
 
         finalEvaluation : GenerateInSameModuleProjectContext -> List (Rule.Error e_)
-        finalEvaluation { inModules } =
+        finalEvaluation { inModules, exposedFromDependencies } =
             let
                 checkIfShouldGenerate :
                     GenerateInSameModuleBaseContext { key : ModuleKey }
@@ -387,17 +407,41 @@ generateInSameModule config =
                     -> List (Rule.Error errorScope_)
                 checkIfShouldGenerate module_ generationRequest =
                     case
-                        Parser.run
-                            generator.checker.nameParser
+                        generator.when.checkName
+                            { declarations =
+                                module_.declarations
+                                    |> Dict.map (\_ -> Node.value)
+
+                            {- , locate =
+                               locateOriginLookup
+                                   (Dict.union
+                                       exposedFromDependencies
+                                       (inModules
+                                           |> Dict.map (\_ -> .declarations >> dictKeys)
+                                       )
+                                   )
+                                   module_.imports
+                            -}
+                            }
                             generationRequest.declarationName
                     of
-                        Ok information ->
+                        Just (Ok information) ->
                             generateDeclarationFix
                                 module_
                                 generationRequest
                                 information
 
-                        Err _ ->
+                        Just (Err errors) ->
+                            [ Rule.errorForModule module_.key
+                                (errorsInContext
+                                    { description = generator.description
+                                    , errors = errors |> List.Nonempty.toList
+                                    }
+                                )
+                                generationRequest.range
+                            ]
+
+                        Nothing ->
                             []
 
                 generateDeclarationFix :
@@ -407,7 +451,7 @@ generateInSameModule config =
                     -> List (Rule.Error scope_)
                 generateDeclarationFix module_ { declarationName, range } information =
                     let
-                        generated =
+                        gen =
                             generate generator.elm
                                 { declarationName = declarationName
                                 , imports = module_.imports
@@ -432,12 +476,14 @@ generateInSameModule config =
                                 range
                                 ([ [ Fix.insertAt insertLocation
                                         ([ "\n\n\n"
-                                         , generated.code |> Generator.print
+                                         , { code = gen.code, imports = Dict.empty }
+                                            |> top
+                                            |> printDeclaration { imports = gen.imports }
                                          ]
                                             |> String.concat
                                         )
                                    ]
-                                 , generated.newImports
+                                 , gen.newImports
                                     |> insertImportsFixAt module_.beforeImports
                                  ]
                                     |> List.concat
@@ -530,6 +576,7 @@ generateInSameModule config =
     in
     Rule.newProjectRuleSchema "Review.Generate"
         initialProjectContext
+        |> withDependencyModulesProjectVisitor exposedFromDependenciesVisitor
         |> Rule.withModuleVisitor
             (withModuleCommentVisitor
                 (\(Node { end } _) context ->
@@ -580,7 +627,7 @@ generateInSameModule config =
                         , isValueOrCall expression
                             |> Maybe.map
                                 (\{ name, range } ->
-                                    case context.lookupModuleNameAt range of
+                                    case context.moduleNameAt range of
                                         Just [] ->
                                             { context
                                                 | generationRequested =
@@ -602,7 +649,7 @@ generateInSameModule config =
                                 typeds typeAnnotation
                                     |> List.foldl
                                         (\{ name, range } ->
-                                            case context.lookupModuleNameAt range of
+                                            case context.moduleNameAt range of
                                                 Nothing ->
                                                     Dict.insert name { range = range }
 
@@ -635,16 +682,57 @@ generateInSameModule config =
         |> Rule.fromProjectRuleSchema
 
 
+exposedFromDependenciesVisitor :
+    Dict
+        ModuleName
+        { unions : List Docs.Union
+        , aliases : List Docs.Alias
+        , values : List Docs.Value
+        , binops : List Docs.Binop
+        }
+    ->
+        { projectContext
+            | exposedFromDependencies :
+                Dict ModuleName (Set String)
+        }
+    ->
+        ( List (Rule.Error { useErrorForModule : () })
+        , { projectContext
+            | exposedFromDependencies :
+                Dict ModuleName (Set String)
+          }
+        )
+exposedFromDependenciesVisitor dependencies context =
+    ( []
+    , { context
+        | exposedFromDependencies =
+            dependencies
+                |> Dict.map
+                    (\_ { unions, aliases, values, binops } ->
+                        [ unions |> List.map .name
+                        , aliases |> List.map .name
+                        , values |> List.map .name
+                        , binops |> List.map .name
+                        ]
+                            |> List.concat
+                            |> Set.fromList
+                    )
+      }
+    )
+
+
 type alias GenerateInDifferentModuleProjectContext =
-    { modulesThatRequestGeneration :
-        List
-            { key : ModuleKey
-            , beforeImports : Location
-            , generationRequested :
-                Dict
-                    String
-                    { range : Range, qualified : Qualified }
-            }
+    { modulesNotToGenerateIn :
+        Dict
+            ModuleName
+            (DifferentModule
+                { key : ModuleKey
+                , generationRequested :
+                    Dict
+                        String
+                        { range : Range, qualified : Qualified }
+                }
+            )
     , moduleToGenerateIn :
         Maybe
             (DifferentModule
@@ -654,6 +742,7 @@ type alias GenerateInDifferentModuleProjectContext =
                     }
                 )
             )
+    , exposed : Dict ModuleName (Set String)
     }
 
 
@@ -668,13 +757,13 @@ type alias ModuleToGenerateInInformation more =
 type alias DifferentModule more =
     { more
         | beforeImports : Location
-        , declarations : Dict String (Node Declaration)
+        , declarations : Dict String (Node Declaration.Declaration)
     }
 
 
 type alias GenerateInDifferentModuleModuleContext =
     DifferentModule
-        { lookupModuleNameAt : Range -> Maybe (List String)
+        { moduleNameAt : Range -> Maybe (List String)
         , kind : GenerateInDifferentModuleModuleContextKind
         }
 
@@ -707,8 +796,9 @@ generateInDifferentModule config =
 
         initialProjectContext : GenerateInDifferentModuleProjectContext
         initialProjectContext =
-            { modulesThatRequestGeneration = []
+            { modulesNotToGenerateIn = Dict.empty
             , moduleToGenerateIn = Nothing
+            , exposed = Dict.empty
             }
 
         moduleFromProjectContext :
@@ -730,20 +820,20 @@ generateInDifferentModule config =
                         { generationRequested = Dict.empty }
             , beforeImports = { row = 2, column = 1 }
             , declarations = Dict.empty
-            , lookupModuleNameAt =
+            , moduleNameAt =
                 ModuleNameLookupTable.moduleNameAt
                     moduleNameLookupTable
             }
 
         moduleToProjectContext :
-            Range
+            Node ModuleName
             -> ModuleKey
             -> GenerateInDifferentModuleModuleContext
             -> GenerateInDifferentModuleProjectContext
-        moduleToProjectContext moduleNameRange moduleKey moduleContext =
+        moduleToProjectContext (Node moduleNameRange moduleName) moduleKey moduleContext =
             case moduleContext.kind of
                 ModuleToGenerateIn { exposing_, markerRanges, imports } ->
-                    { modulesThatRequestGeneration = []
+                    { modulesNotToGenerateIn = Dict.empty
                     , moduleToGenerateIn =
                         { key = moduleKey
                         , moduleNameRange = moduleNameRange
@@ -754,16 +844,19 @@ generateInDifferentModule config =
                         , markerRanges = markerRanges
                         }
                             |> Just
+                    , exposed = Dict.empty
                     }
 
                 ModuleNotToGenerateIn { generationRequested } ->
-                    { modulesThatRequestGeneration =
-                        [ { key = moduleKey
-                          , beforeImports = moduleContext.beforeImports
-                          , generationRequested = generationRequested
-                          }
-                        ]
+                    { modulesNotToGenerateIn =
+                        Dict.singleton moduleName
+                            { key = moduleKey
+                            , beforeImports = moduleContext.beforeImports
+                            , declarations = moduleContext.declarations
+                            , generationRequested = generationRequested
+                            }
                     , moduleToGenerateIn = Nothing
+                    , exposed = Dict.empty
                     }
 
         foldProjectContexts :
@@ -771,19 +864,22 @@ generateInDifferentModule config =
             -> GenerateInDifferentModuleProjectContext
             -> GenerateInDifferentModuleProjectContext
         foldProjectContexts a b =
-            { modulesThatRequestGeneration =
-                [ a, b ]
-                    |> List.concatMap .modulesThatRequestGeneration
+            { modulesNotToGenerateIn =
+                Dict.union a.modulesNotToGenerateIn
+                    b.modulesNotToGenerateIn
             , moduleToGenerateIn =
                 [ a, b ]
                     |> List.map .moduleToGenerateIn
                     |> firstJust
+            , exposed =
+                Dict.union a.exposed
+                    b.exposed
             }
 
         finalEvaluation :
             GenerateInDifferentModuleProjectContext
             -> List (Rule.Error e_)
-        finalEvaluation { modulesThatRequestGeneration, moduleToGenerateIn } =
+        finalEvaluation { modulesNotToGenerateIn, moduleToGenerateIn, exposed } =
             let
                 generateIfShould :
                     DifferentModule
@@ -801,19 +897,44 @@ generateInDifferentModule config =
                     -> List (Rule.Error errorScope_)
                 generateIfShould existingModuleToGenerateIn { declarationName, qualified, range, moduleThatRequestsGeneration } =
                     let
+                        parseNameAndGenerateIfShould : List (Rule.Error scope_)
                         parseNameAndGenerateIfShould =
                             case
-                                Parser.run
-                                    generator.checker.nameParser
+                                generator.when.checkName
+                                    { declarations =
+                                        existingModuleToGenerateIn.declarations
+                                            |> Dict.map (\_ -> Node.value)
+
+                                    {- , locate =
+                                       locateOriginLookup
+                                           (Dict.union
+                                               exposedFromDependencies
+                                               (modulesNotToGenerateIn
+                                                   |> Dict.map (\_ -> .declarations >> dictKeys)
+                                               )
+                                           )
+                                           existingModuleToGenerateIn.imports
+                                    -}
+                                    }
                                     declarationName
                             of
-                                Ok information ->
+                                Just (Ok information) ->
                                     generateDeclarationFix
                                         existingModuleToGenerateIn
                                         { declarationName = declarationName }
                                         information
 
-                                Err _ ->
+                                Just (Err errors) ->
+                                    [ Rule.errorForModule moduleThatRequestsGeneration
+                                        (errorsInContext
+                                            { description = generator.description
+                                            , errors = errors |> List.Nonempty.toList
+                                            }
+                                        )
+                                        range
+                                    ]
+
+                                Nothing ->
                                     []
                     in
                     case qualified of
@@ -821,7 +942,7 @@ generateInDifferentModule config =
                             parseNameAndGenerateIfShould
 
                         Unqualified ->
-                            case generator.checker.requireQualified |> val of
+                            case generator.when.requireQualified |> val of
                                 AllowsUnqualified ->
                                     [ parseNameAndGenerateIfShould
                                     , [ Rule.errorForModuleWithFix
@@ -830,13 +951,10 @@ generateInDifferentModule config =
                                                 { description = generator.description }
                                             )
                                             range
-                                            (Dict.singleton nameOfModuleToGenerateIn
-                                                { alias = Nothing
-                                                , exposed =
-                                                    CodeGen.exposeExplicit
-                                                        [ CodeGen.funExpose declarationName ]
-                                                        |> Just
-                                                }
+                                            (Code.import_ nameOfModuleToGenerateIn
+                                                |> Code.withExposing (Code.addValueExposes [ declarationName ])
+                                                |> List.singleton
+                                                |> importsFromList
                                                 |> insertImportsFixAt
                                                     existingModuleToGenerateIn.beforeImports
                                             )
@@ -876,7 +994,7 @@ generateInDifferentModule config =
                                 )
                                 existingModuleToGenerateIn.moduleNameRange
                                 (let
-                                    { code, newImports } =
+                                    { code, newImports, imports } =
                                         generate generator.elm
                                             { declarationName = declarationName
                                             , imports = existingModuleToGenerateIn.imports
@@ -885,7 +1003,9 @@ generateInDifferentModule config =
                                  in
                                  [ [ Fix.insertAt insertLocation
                                         ([ "\n\n\n"
-                                         , code |> Generator.print
+                                         , { code = code, imports = Dict.empty }
+                                            |> top
+                                            |> printDeclaration { imports = imports }
                                          ]
                                             |> String.concat
                                         )
@@ -965,12 +1085,13 @@ generateInDifferentModule config =
                             in
                             generateDeclaration insertLocation
 
-                        OtherInsertLocation otherInsertLocation ->
-                            never otherInsertLocation
+                        OtherInsertLocation (NoLocationSpecificToDifferentModule ever) ->
+                            never ever
             in
             case moduleToGenerateIn of
                 Just existingModuleToGenerateIn ->
-                    modulesThatRequestGeneration
+                    modulesNotToGenerateIn
+                        |> Dict.values
                         |> List.concatMap
                             (\{ generationRequested, key } ->
                                 Dict.diff
@@ -989,22 +1110,24 @@ generateInDifferentModule config =
                             )
 
                 Nothing ->
+                    -- maybe instead use a range where it was referenced in
                     [ Rule.globalError
                         (missingModuleError nameOfModuleToGenerateIn
                             { oneDeclarationKind = generator.description }
                         )
                     ]
 
-        {- find a better name -}
-        requestsGeneration :
+        isFromModuleToGenerateIn :
             (Range -> Maybe (List String))
             -> Range
             -> Maybe Qualified
-        requestsGeneration lookupModuleNameAt range =
-            case lookupModuleNameAt range of
+        isFromModuleToGenerateIn moduleNameAt range =
+            case moduleNameAt range of
                 Just (moduleNameHead :: moduleNameRest) ->
                     if
-                        ( moduleNameHead, moduleNameRest )
+                        ((moduleNameHead :: moduleNameRest)
+                            |> moduleNameFromSyntax
+                        )
                             == nameOfModuleToGenerateIn
                     then
                         Qualified |> Just
@@ -1020,6 +1143,7 @@ generateInDifferentModule config =
     in
     Rule.newProjectRuleSchema "Review.Generate"
         initialProjectContext
+        |> withDependencyModulesProjectVisitor exposedFromDependenciesVisitor
         |> Rule.withModuleVisitor
             (Rule.withModuleDefinitionVisitor
                 (\(Node _ moduleDefinition) moduleContext ->
@@ -1100,44 +1224,32 @@ generateInDifferentModule config =
                         )
                     )
                 >> Rule.withExpressionEnterVisitor
-                    (\(Node expressionRange expression) context ->
+                    (\expression context ->
                         ( []
                         , case context.kind of
+                            ModuleNotToGenerateIn notFieldHelpersModuleContext ->
+                                isValueOrCall expression
+                                    |> Maybe.andThen
+                                        (\{ range, name } ->
+                                            isFromModuleToGenerateIn context.moduleNameAt range
+                                                |> Maybe.map
+                                                    (\qualified ->
+                                                        { context
+                                                            | kind =
+                                                                { notFieldHelpersModuleContext
+                                                                    | generationRequested =
+                                                                        notFieldHelpersModuleContext.generationRequested
+                                                                            |> Dict.insert name
+                                                                                { qualified = qualified, range = range }
+                                                                }
+                                                                    |> ModuleNotToGenerateIn
+                                                        }
+                                                    )
+                                        )
+                                    |> Maybe.withDefault context
+
                             ModuleToGenerateIn _ ->
                                 context
-
-                            ModuleNotToGenerateIn notFieldHelpersModuleContext ->
-                                let
-                                    insertRequestedGeneration name nameRange =
-                                        case
-                                            requestsGeneration context.lookupModuleNameAt
-                                                nameRange
-                                        of
-                                            Just qualified ->
-                                                { notFieldHelpersModuleContext
-                                                    | generationRequested =
-                                                        notFieldHelpersModuleContext.generationRequested
-                                                            |> Dict.insert name
-                                                                { qualified = qualified, range = nameRange }
-                                                }
-
-                                            Nothing ->
-                                                notFieldHelpersModuleContext
-                                in
-                                { context
-                                    | kind =
-                                        (case expression of
-                                            Expression.FunctionOrValue _ name ->
-                                                insertRequestedGeneration name expressionRange
-
-                                            Expression.Application ((Node nameRange (Expression.FunctionOrValue _ name)) :: _ :: _) ->
-                                                insertRequestedGeneration name nameRange
-
-                                            _ ->
-                                                notFieldHelpersModuleContext
-                                        )
-                                            |> ModuleNotToGenerateIn
-                                }
                         )
                     )
                 >> withTypeAnnotationVisitor
@@ -1154,7 +1266,7 @@ generateInDifferentModule config =
                                                         (typeds typeAnnotation
                                                             |> List.filterMap
                                                                 (\{ name, range } ->
-                                                                    requestsGeneration context.lookupModuleNameAt
+                                                                    isFromModuleToGenerateIn context.moduleNameAt
                                                                         range
                                                                         |> Maybe.map
                                                                             (\qualified ->
@@ -1189,9 +1301,7 @@ generateInDifferentModule config =
                 Rule.initContextCreator
                     (\metadata ->
                         moduleToProjectContext
-                            (Rule.moduleNameNodeFromMetadata metadata
-                                |> Node.range
-                            )
+                            (moduleNameNodeFromMetadata metadata)
                     )
                     |> Rule.withMetadata
                     |> Rule.withModuleKey
@@ -1220,18 +1330,15 @@ insertImportsFixAt insertLocation newImports =
 --
 
 
-type Config information codeReplacingStub requireQualified declaration
-    = ReplaceStub (ReplaceStubConfig information codeReplacingStub)
+type Config information requireQualified declaration
+    = ReplaceStub (ReplaceStubConfig information)
     | InSameModule (InSameModuleConfig information declaration)
     | InDifferentModule (InDifferentModuleConfig requireQualified information declaration)
 
 
-type alias ReplaceStubConfig information code =
+type alias ReplaceStubConfig information =
     { stub : String
-    , generator :
-        ExpressionGenerator
-            information
-            (Generator.Code { code | expression : CodeGen.Expression })
+    , generator : ExpressionGenerator information
     }
 
 
@@ -1241,7 +1348,7 @@ type alias InModuleConfig config requireQualified information declaration =
             DeclarationGenerator
                 requireQualified
                 information
-                (Generator.Declaration declaration)
+                declaration
     }
 
 
@@ -1250,7 +1357,7 @@ type alias InDifferentModuleConfig requireQualified information declaration =
         { name : ModuleName
         , insertLocation :
             DeclarationInsertLocation
-                DeclarationInsertLocationInDifferentModule
+                InsertLocationInDifferentModule
                 information
         }
         requireQualified
@@ -1262,7 +1369,7 @@ type alias InSameModuleConfig information declaration =
     InModuleConfig
         { insertLocation :
             DeclarationInsertLocation
-                DeclarationInsertLocationInSameModule
+                InsertLocationInSameModule
                 information
         }
         AllowsUnqualified
@@ -1277,12 +1384,14 @@ type DeclarationInsertLocation otherInsertLocation information
     | OtherInsertLocation otherInsertLocation
 
 
-type DeclarationInsertLocationInSameModule
+type InsertLocationInSameModule
     = AfterDeclarationItWasReferencedIn
 
 
-type alias DeclarationInsertLocationInDifferentModule =
-    Never
+type InsertLocationInDifferentModule
+    = -- We could directly alias Never
+      -- but adding options later would be a breaking change
+      NoLocationSpecificToDifferentModule Never
 
 
 inModule :
@@ -1291,75 +1400,65 @@ inModule :
         DeclarationGenerator
             requireQualified
             information
-            (Generator.Declaration declaration)
+            declarationKind
     ->
         Generalizable
             (InDifferentModuleConfig
                 requireQualified
                 information
-                declaration
+                declarationKind
             )
             (Config
                 information
-                codeReplacingStub_
                 requireQualified
-                declaration
+                declarationKind
             )
 inModule moduleToGenerateIn generator =
-    { name = moduleToGenerateIn
-    , generator = generator
-    , insertLocation = InsertBelowAllDeclarations
+    { this =
+        { name = moduleToGenerateIn
+        , generator = generator
+        , insertLocation = InsertBelowAllDeclarations
+        }
+    , rootWith = InDifferentModule
     }
-        |> generalizable InDifferentModule
+        |> Reference.fromRecord
 
 
 inSameModule :
     DeclarationGenerator
         AllowsUnqualified
         information
-        (Generator.Declaration declaration)
+        declarationKind
     ->
         Generalizable
-            (InSameModuleConfig
-                information
-                declaration
-            )
-            (Config
-                information
-                codeReplacingStub_
-                requireQualified_
-                declaration
-            )
+            (InSameModuleConfig information declarationKind)
+            (Config information Never declarationKind)
 inSameModule generator =
-    { generator = generator
-    , insertLocation =
-        OtherInsertLocation AfterDeclarationItWasReferencedIn
+    { this =
+        { generator = generator
+        , insertLocation =
+            OtherInsertLocation AfterDeclarationItWasReferencedIn
+        }
+    , rootWith = InSameModule
     }
-        |> generalizable InSameModule
+        |> Reference.fromRecord
 
 
 replaceStub :
     String
-    ->
-        ExpressionGenerator
-            information
-            (Generator.Code
-                { codeReplacingStub | expression : CodeGen.Expression }
-            )
+    -> ExpressionGenerator information
     ->
         Generalizable
-            (ReplaceStubConfig information codeReplacingStub)
-            (Config
-                information
-                codeReplacingStub
-                requireQualified_
-                declaration_
-            )
+            (ReplaceStubConfig information)
+            (Config information Never Never)
 replaceStub stub generator =
-    { generator = generator
-    , stub = stub
+    { this =
+        { generator = generator
+        , stub = stub
+        }
+    , rootWith = ReplaceStub
     }
-        |> generalizable ReplaceStub
+        |> Reference.fromRecord
 
 
 
@@ -1435,25 +1534,20 @@ missingModuleError :
     -> { oneDeclarationKind : String }
     -> ErrorInfo
 missingModuleError moduleName { oneDeclarationKind } =
-    let
-        moduleNameString =
-            moduleName |> fromNonempty |> String.join "."
-    in
     { message =
-        [ "Module `"
-        , moduleNameString
-        , "` doesn't exist yet"
+        [ "Missing module `"
+        , moduleName
+        , "`"
         ]
             |> String.concat
     , details =
         [ [ "Create a new module `"
-          , moduleNameString
+          , moduleName
           , ".elm` that will contain every generated "
           , oneDeclarationKind
           , "."
           ]
             |> String.concat
-        , "Everything in there can then be imported from every other module."
         ]
     }
 
@@ -1500,17 +1594,33 @@ duplicateMarkerError marker { for } =
 
 errorInArguments :
     { description : String
-    , errorMessage : String
+    , errors : List String
     }
     -> ErrorInfo
-errorInArguments { description, errorMessage } =
+errorInArguments { description, errors } =
     { message =
         [ "Invalid arguments given to "
         , description
         , " generator"
         ]
             |> String.concat
-    , details = [ errorMessage ]
+    , details = errors
+    }
+
+
+errorsInContext :
+    { description : String
+    , errors : List String
+    }
+    -> ErrorInfo
+errorsInContext { description, errors } =
+    { message =
+        [ "Bad context for `"
+        , description
+        , "` generator"
+        ]
+            |> String.concat
+    , details = errors
     }
 
 
@@ -1552,7 +1662,7 @@ withModuleCommentVisitor visitor moduleRuleSchema =
 withImportVisitor :
     ({ moduleName : ModuleName
      , alias : Maybe String
-     , exposed : Maybe Exposing
+     , exposed : Maybe Code.Exposing
      , range : Range
      }
      -> moduleContext
@@ -1564,27 +1674,23 @@ withImportVisitor visitor moduleRuleSchema =
     moduleRuleSchema
         |> Rule.withImportVisitor
             (\(Node range { moduleName, moduleAlias, exposingList }) ->
-                case moduleName |> Node.value |> toNonempty of
-                    Just nonemptyModuleName ->
-                        visitor
-                            { moduleName = nonemptyModuleName
-                            , alias =
-                                moduleAlias
-                                    |> Maybe.andThen
-                                        (List.head << Node.value)
-                            , exposed =
-                                exposingList |> Maybe.map Node.value
-                            , range = range
-                            }
-
-                    Nothing ->
-                        -- never
-                        \context -> ( [], context )
+                visitor
+                    { moduleName =
+                        moduleName |> Node.value |> moduleNameFromSyntax
+                    , alias =
+                        moduleAlias
+                            |> Maybe.andThen
+                                (List.head << Node.value)
+                    , exposed =
+                        exposingList
+                            |> Maybe.map (syntaxToExposingIn << Node.value)
+                    , range = range
+                    }
             )
 
 
 withTopLevelDeclarationListVisitor :
-    (Dict String (Node Declaration)
+    (Dict String (Node Declaration.Declaration)
      -> moduleContext
      -> ( List (Rule.Error {}), moduleContext )
     )
@@ -1624,7 +1730,7 @@ withTypeAnnotationVisitor visitor moduleRuleSchema =
                     typeAnnotations : List (Node TypeAnnotation)
                     typeAnnotations =
                         case declaration of
-                            FunctionDeclaration { signature } ->
+                            Declaration.FunctionDeclaration { signature } ->
                                 signature
                                     |> Maybe.map
                                         (\(Node _ { typeAnnotation }) ->
@@ -1632,23 +1738,23 @@ withTypeAnnotationVisitor visitor moduleRuleSchema =
                                         )
                                     |> Maybe.withDefault []
 
-                            AliasDeclaration { typeAnnotation } ->
+                            Declaration.AliasDeclaration { typeAnnotation } ->
                                 [ typeAnnotation ]
 
-                            CustomTypeDeclaration { constructors } ->
+                            Declaration.CustomTypeDeclaration { constructors } ->
                                 constructors
                                     |> List.concatMap
                                         (\(Node _ { arguments }) ->
                                             arguments
                                         )
 
-                            PortDeclaration { typeAnnotation } ->
+                            Declaration.PortDeclaration { typeAnnotation } ->
                                 [ typeAnnotation ]
 
-                            InfixDeclaration _ ->
+                            Declaration.InfixDeclaration _ ->
                                 []
 
-                            Destructuring _ _ ->
+                            Declaration.Destructuring _ _ ->
                                 []
                 in
                 typeAnnotations
@@ -1679,9 +1785,53 @@ withTypeAnnotationVisitor visitor moduleRuleSchema =
             )
 
 
+withDependencyModulesProjectVisitor :
+    (Dict
+        ModuleName
+        { unions : List Docs.Union
+        , aliases : List Docs.Alias
+        , values : List Docs.Value
+        , binops : List Docs.Binop
+        }
+     -> projectContext
+     -> ( List (Rule.Error { useErrorForModule : () }), projectContext )
+    )
+    -> ProjectRuleSchema schemaState projectContext moduleContext
+    ->
+        ProjectRuleSchema
+            { schemaState | hasAtLeastOneVisitor : () }
+            projectContext
+            moduleContext
+withDependencyModulesProjectVisitor visitor projectRuleSchema =
+    projectRuleSchema
+        |> Rule.withDependenciesProjectVisitor
+            (\dependencies ->
+                dependencies
+                    |> Dict.values
+                    |> List.concatMap Dependency.modules
+                    |> List.map
+                        (\{ name, unions, aliases, values, binops } ->
+                            ( name
+                            , { unions = unions
+                              , aliases = aliases
+                              , values = values
+                              , binops = binops
+                              }
+                            )
+                        )
+                    |> Dict.fromList
+                    |> visitor
+            )
+
+
 moduleNameFromMetadata : Rule.Metadata -> ModuleName
 moduleNameFromMetadata metadata =
     Rule.moduleNameFromMetadata metadata
-        |> toNonempty
-        -- always succeeds
-        |> Maybe.withDefault ( "", [] )
+        |> moduleNameFromSyntax
+
+
+moduleNameNodeFromMetadata : Rule.Metadata -> Node ModuleName
+moduleNameNodeFromMetadata metadata =
+    metadata
+        |> Rule.moduleNameNodeFromMetadata
+        |> Node.map moduleNameFromSyntax
